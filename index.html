@@ -109,10 +109,33 @@
   .bar-track{ height:8px; background:var(--mint-soft); border-radius:5px; overflow:hidden; margin:8px 0 4px; }
   .bar-fill{ height:100%; background:var(--primary); }
 
-  .ph-month{ display:flex; justify-content:space-between; align-items:baseline;
-    padding:14px 4px 6px; }
-  .ph-month .label{ font-family:'Fraunces',serif; font-size:17px; color:var(--primary-dark); }
-  .ph-month .total{ font-weight:700; font-size:14.5px; }
+  .ph-month{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+
+  background:var(--primary-dark);
+  color:#fff;
+
+  padding:13px 14px;
+  margin:22px 0 10px;
+
+  border-radius:10px;
+  box-shadow:0 2px 6px rgba(0,0,0,0.12);
+}
+
+.ph-month .label{
+  font-family:'Fraunces','IBM Plex Sans',serif;
+  font-size:20px;
+  font-weight:800;
+  color:#fff;
+}
+
+.ph-month .total{
+  font-size:15px;
+  font-weight:800;
+  color:#fff;
+}
   .ph-day{ display:flex; justify-content:space-between; align-items:baseline;
     padding:8px 4px; background:var(--mint-soft); border-radius:8px; margin-top:8px; font-size:13px; }
   .ph-day .label{ font-weight:600; color:var(--primary-dark); }
