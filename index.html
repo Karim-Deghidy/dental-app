@@ -234,7 +234,10 @@
     </div>
     <div class="toolbar">
       <select id="branchFilter" onchange="renderPatients()" style="flex:1;"></select>
-      <select id="sortSelect" onchange="renderPatients()">
+      <select id="monthFilter" onchange="renderPatients()" style="flex:1;"></select>
+    </div>
+    <div class="toolbar">
+      <select id="sortSelect" onchange="renderPatients()" style="flex:1;">
         <option value="nameAZ">Name A–Z</option>
         <option value="amountDesc">Amount ↓</option>
       </select>
@@ -255,7 +258,7 @@
 
   <div class="card" style="margin-top:6px;">
     <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">
-      Data is stored on this device only. Back it up regularly.
+      Data is stored in Firebase and synced across devices. Keep regular backups.
     </div>
     <div class="btn-row">
       <button class="btn-ghost" onclick="exportBackup()">Export Backup (JSON)</button>
@@ -365,15 +368,186 @@
   </div>
 </div>
 
-<script>
-/* ---------- Storage ---------- */
-const STORE_RECORDS = 'sanad_records';
-const STORE_EXPENSES = 'sanad_expenses';
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 
-function loadRecords(){ return JSON.parse(localStorage.getItem(STORE_RECORDS) || '[]'); }
-function saveRecords(r){ localStorage.setItem(STORE_RECORDS, JSON.stringify(r)); }
-function loadExpenses(){ return JSON.parse(localStorage.getItem(STORE_EXPENSES) || '[]'); }
-function saveExpenses(e){ localStorage.setItem(STORE_EXPENSES, JSON.stringify(e)); }
+<script>
+/* ---------- Firebase / Storage ---------- */
+
+const firebaseConfig = {
+  apiKey: "AIzaSyD0-HTv1d9xyepruMsJPUXrw-1eDGcPy38",
+  authDomain: "dental-app-b541e.firebaseapp.com",
+  projectId: "dental-app-b541e",
+  storageBucket: "dental-app-b541e.firebasestorage.app",
+  messagingSenderId: "873355894846",
+  appId: "1:873355894846:web:92e5dd3e223efe5e88f16f",
+  measurementId: "G-7VKBMSQV8C"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+const LEGACY_STORE_RECORDS = 'sanad_records';
+const LEGACY_STORE_EXPENSES = 'sanad_expenses';
+
+let recordsCache = [];
+let expensesCache = [];
+let recordsLoaded = false;
+let expensesLoaded = false;
+let legacyMigrationChecked = false;
+
+function loadRecords(){
+  return recordsCache.map(r => ({...r}));
+}
+
+function loadExpenses(){
+  return expensesCache.map(e => ({...e}));
+}
+
+function cleanForFirestore(obj){
+  const clean = {};
+  Object.entries(obj || {}).forEach(([key,value]) => {
+    if(key.startsWith('_') || value === undefined) return;
+    clean[key] = value;
+  });
+  return clean;
+}
+
+function objectsEqual(a,b){
+  return JSON.stringify(cleanForFirestore(a)) === JSON.stringify(cleanForFirestore(b));
+}
+
+async function syncCollection(collectionName, oldList, newList){
+  const oldMap = new Map(oldList.map(item => [item.id, cleanForFirestore(item)]));
+  const newMap = new Map(newList.map(item => [item.id, cleanForFirestore(item)]));
+  const actions = [];
+
+  oldMap.forEach((item,id) => {
+    if(!newMap.has(id)) actions.push({type:'delete', id});
+  });
+
+  newMap.forEach((item,id) => {
+    if(!oldMap.has(id) || !objectsEqual(oldMap.get(id), item)){
+      actions.push({type:'set', id, data:item});
+    }
+  });
+
+  // Firestore batches have a write limit; keep plenty of room below it.
+  for(let i=0; i<actions.length; i+=400){
+    const batch = db.batch();
+    actions.slice(i, i+400).forEach(action => {
+      const ref = db.collection(collectionName).doc(action.id);
+      if(action.type === 'delete') batch.delete(ref);
+      else batch.set(ref, action.data);
+    });
+    await batch.commit();
+  }
+}
+
+function refreshViews(){
+  renderPatients();
+  renderExpenses();
+  renderSummary();
+}
+
+async function saveRecords(nextRecords){
+  const previous = recordsCache.map(r => ({...r}));
+  recordsCache = nextRecords.map(r => cleanForFirestore(r));
+  refreshViews();
+
+  try{
+    await syncCollection('visits', previous, recordsCache);
+  }catch(err){
+    console.error('Could not save visits to Firestore:', err);
+    recordsCache = previous;
+    refreshViews();
+    alert('Could not save patient data to Firebase. Check your Firestore Rules and internet connection.');
+  }
+}
+
+async function saveExpenses(nextExpenses){
+  const previous = expensesCache.map(e => ({...e}));
+  expensesCache = nextExpenses.map(e => cleanForFirestore(e));
+  refreshViews();
+
+  try{
+    await syncCollection('expenses', previous, expensesCache);
+  }catch(err){
+    console.error('Could not save expenses to Firestore:', err);
+    expensesCache = previous;
+    refreshViews();
+    alert('Could not save expense data to Firebase. Check your Firestore Rules and internet connection.');
+  }
+}
+
+async function maybeMigrateLegacyBrowserData(){
+  if(legacyMigrationChecked || !recordsLoaded || !expensesLoaded) return;
+  legacyMigrationChecked = true;
+
+  let oldRecords = [];
+  let oldExpenses = [];
+
+  try{
+    oldRecords = JSON.parse(localStorage.getItem(LEGACY_STORE_RECORDS) || '[]');
+    oldExpenses = JSON.parse(localStorage.getItem(LEGACY_STORE_EXPENSES) || '[]');
+  }catch(err){
+    console.warn('Could not read old local browser data:', err);
+  }
+
+  if(!oldRecords.length && !oldExpenses.length) return;
+
+  // Only offer automatic migration when Firebase is still empty.
+  // Existing Firebase data will never be overwritten automatically.
+  if(recordsCache.length === 0 && expensesCache.length === 0){
+    const migrate = confirm(
+      `I found ${oldRecords.length} patient record(s) and ${oldExpenses.length} expense(s) saved only in this browser.\n\nUpload them to Firebase now?`
+    );
+
+    if(migrate){
+      if(oldRecords.length) await saveRecords(oldRecords);
+      if(oldExpenses.length) await saveExpenses(oldExpenses);
+      alert('Old browser data has been uploaded to Firebase.');
+    }
+  }
+}
+
+function startFirebaseSync(){
+  const patientCard = document.getElementById('patientListCard');
+  if(patientCard){
+    patientCard.innerHTML = `<div class="empty"><div class="glyph">☁️</div><div>Connecting to Firebase…</div></div>`;
+  }
+
+  db.collection('visits').onSnapshot(snapshot => {
+    recordsCache = snapshot.docs.map(doc => ({
+      ...doc.data(),
+      id: doc.id
+    }));
+    recordsLoaded = true;
+    renderPatients();
+    renderSummary();
+    maybeMigrateLegacyBrowserData();
+  }, err => {
+    console.error('Visits listener error:', err);
+    recordsLoaded = true;
+    if(patientCard){
+      patientCard.innerHTML = `<div class="empty"><div class="glyph">⚠️</div><div>Could not connect to Firebase. Check Firestore Rules and your internet connection.</div></div>`;
+    }
+  });
+
+  db.collection('expenses').onSnapshot(snapshot => {
+    expensesCache = snapshot.docs.map(doc => ({
+      ...doc.data(),
+      id: doc.id
+    }));
+    expensesLoaded = true;
+    renderExpenses();
+    renderSummary();
+    maybeMigrateLegacyBrowserData();
+  }, err => {
+    console.error('Expenses listener error:', err);
+    expensesLoaded = true;
+  });
+}
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
@@ -625,12 +799,46 @@ function populateBranchFilter(){
   sel.value = (current === 'all' || BRANCHES.includes(current)) ? current : 'all';
 }
 
+function getMonthKey(dateValue){
+  const d = new Date(dateValue);
+  if(isNaN(d.getTime())) return '';
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+}
+
+function getMonthLabel(monthKey){
+  const [year, month] = monthKey.split('-').map(Number);
+  return new Date(year, month-1, 1).toLocaleDateString(undefined, {
+    month:'long',
+    year:'numeric'
+  });
+}
+
+function populateMonthFilter(){
+  const sel = document.getElementById('monthFilter');
+  if(!sel) return;
+
+  const current = sel.value || 'all';
+
+  const monthKeys = [...new Set(
+    loadRecords()
+      .map(r => getMonthKey(r.date))
+      .filter(Boolean)
+  )].sort().reverse();
+
+  sel.innerHTML = `<option value="all">All Months</option>` +
+    monthKeys.map(k => `<option value="${k}">${getMonthLabel(k)}</option>`).join('');
+
+  sel.value = (current === 'all' || monthKeys.includes(current)) ? current : 'all';
+}
+
 function renderPatients(){
   populateBranchFilter();
+  populateMonthFilter();
 
   const q = (document.getElementById('searchInput').value || '').toLowerCase();
   const sortBy = document.getElementById('sortSelect').value;
   const branchFilter = document.getElementById('branchFilter').value;
+  const monthFilter = document.getElementById('monthFilter').value;
 
   let records = loadRecords();
 
@@ -639,6 +847,10 @@ function renderPatients(){
 
   if(branchFilter !== 'all'){
     records = records.filter(r => r._branch === branchFilter);
+  }
+
+  if(monthFilter !== 'all'){
+    records = records.filter(r => getMonthKey(r.date) === monthFilter);
   }
 
   if(q){
@@ -982,25 +1194,35 @@ document.getElementById('importBackupInput').addEventListener('change', (e)=>{
   const file = e.target.files[0];
   if(!file) return;
   const reader = new FileReader();
-  reader.onload = (ev)=>{
+  reader.onload = async (ev)=>{
     try{
       const data = JSON.parse(ev.target.result);
-      if(!confirm('This will merge the backup into your current data. Continue?')) return;
-      const records = loadRecords().concat(data.records||[]);
-      const expenses = loadExpenses().concat(data.expenses||[]);
-      saveRecords(records);
-      saveExpenses(expenses);
-      alert('Backup imported.');
-      renderPatients(); renderExpenses(); renderSummary();
+      if(!confirm('This will merge the backup into your Firebase data. Continue?')) return;
+
+      const recordMap = new Map(loadRecords().map(r => [r.id, r]));
+      (data.records || []).forEach(r => {
+        if(r && r.id) recordMap.set(r.id, r);
+      });
+
+      const expenseMap = new Map(loadExpenses().map(e => [e.id, e]));
+      (data.expenses || []).forEach(e => {
+        if(e && e.id) expenseMap.set(e.id, e);
+      });
+
+      await saveRecords(Array.from(recordMap.values()));
+      await saveExpenses(Array.from(expenseMap.values()));
+
+      alert('Backup imported to Firebase.');
     }catch(err){
-      alert('Could not read that backup file.');
+      console.error(err);
+      alert('Could not read or import that backup file.');
     }
   };
   reader.readAsText(file);
 });
 
 /* init */
-renderPatients();
+startFirebaseSync();
 </script>
 </body>
 </html>
